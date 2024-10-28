@@ -18,7 +18,7 @@ toolbox.register("compile", gp.compile, pset=pset)
 out_dir = 'out-shakespeare-char'
 eval_interval = 250 # keep frequent because we'll overfit
 eval_iters = 200
-log_interval = 10 # don't print too too often
+log_interval = 1 # don't print too too often
 
 # we expect to overfit on this small dataset, so only save when val improves
 always_save_checkpoint = False
@@ -45,7 +45,8 @@ min_lr = 1e-4 # learning_rate / 10 usually
 beta2 = 0.99 # make a bit bigger because number of tokens per iter is small
 
 warmup_iters = 100 # not super necessary potentially
-_, loss_fn = load_individual_from_json(data=None, pset=pset, toolbox=toolbox, filename = "evolved_loss.json")
+_, loss = load_individual_from_json(data=None, pset=pset, toolbox=toolbox, filename = "evolved_loss.json")
+
 # on macbook also add
-device = 'cpu'  # run on cpu only
+device = 'cuda'  # run on cpu only
 compile = False # do not torch compile the model

@@ -130,7 +130,68 @@ def get_batch(split):
         x, y = x.pin_memory().to(device, non_blocking=True), y.pin_memory().to(device, non_blocking=True)
     else:
         x, y = x.to(device), y.to(device)
-    return x, y
+    return x, y.
+
+@torch.no_grad()
+def calculate_topk_acc(logits, targets, k=(1,5)):
+    """
+    Calculate top-k accuracy for specified k values
+    Args:
+        logits: (batch_size, seq_len, vocab_size)
+        targets: (batch_size, seq_len)
+        k: tuple of k values to calculate accuracy for
+    Returns:
+        Dict of top-k accuracies
+    """
+    maxk = max(k)
+    batch_size = targets.size(0)
+    
+    # Flatten the logits and targets
+    logits = logits.reshape(-1, logits.size(-1))
+    targets = targets.reshape(-1)
+    
+    # Get top k predictions
+    _, pred = logits.topk(maxk, 1, True, True)
+    pred = pred.t()  # (k, num_samples)
+    
+    # Compare predictions to targets
+    correct = pred.eq(targets.view(1, -1).expand_as(pred))
+    
+    # Calculate accuracies for each k
+    acc_dict = {}
+    for ki in k:
+        correct_k = correct[:ki].reshape(-1).float().sum(0, keepdim=True)
+        acc = correct_k.mul_(100.0 / targets.numel())
+        acc_dict[f'top{ki}'] = acc.item()
+    
+    return acc_dict
+
+# modified loss estimation function that also calculates accuracy
+@torch.no_grad()
+def estimate_loss_and_acc():
+    out = {}
+    model.eval()
+    for split in ['train', 'val']:
+        losses = torch.zeros(eval_iters)
+        top1_accs = torch.zeros(eval_iters)
+        top5_accs = torch.zeros(eval_iters)
+        
+        for k in range(eval_iters):
+            X, Y = get_batch(split)
+            with ctx:
+                logits, loss = model(X, Y)
+                accs = calculate_topk_acc(logits, Y, k=(1,5))
+            
+            losses[k] = loss.item()
+            top1_accs[k] = accs['top1']
+            top5_accs[k] = accs['top5']
+            
+        out[f'{split}/loss'] = losses.mean()
+        out[f'{split}/top1_acc'] = top1_accs.mean()
+        out[f'{split}/top5_acc'] = top5_accs.mean()
+    
+    model.train()
+    return out
 
 # init these up here, can override if init_from='resume' (i.e. from a checkpoint)
 iter_num = 0
@@ -155,7 +216,6 @@ if init_from == 'scratch':
     if meta_vocab_size is None:
         print("defaulting to vocab_size of GPT-2 to 50304 (50257 rounded up for efficiency)")
     model_args['vocab_size'] = meta_vocab_size if meta_vocab_size is not None else 50304
-    breakpoint()
     gptconf = GPTConfig(**model_args)
     model = GPT(gptconf)
 elif init_from == 'resume':
@@ -264,18 +324,24 @@ while True:
 
     # evaluate the loss on train/val sets and write checkpoints
     if iter_num % eval_interval == 0 and master_process:
-        losses = estimate_loss()
-        print(f"step {iter_num}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
+        metrics  = estimate_loss_and_acc()
+        print(f"step {iter_num}: train loss {metrics['train/loss']:.4f}, val loss {metrics['val/loss']:.4f}")
+        print(f"train acc@1 {metrics['train/top1_acc']:.2f}%, val acc@1 {metrics['val/top1_acc']:.2f}%")
+        print(f"train acc@5 {metrics['train/top5_acc']:.2f}%, val acc@5 {metrics['val/top5_acc']:.2f}%")
         if wandb_log:
             wandb.log({
                 "iter": iter_num,
-                "train/loss": losses['train'],
-                "val/loss": losses['val'],
+                "train/loss": metrics['train/loss'],
+                "val/loss": metrics['val/loss'],
+                "train/top1_acc": metrics['train/top1_acc'],
+                "val/top1_acc": metrics['val/top1_acc'],
+                "train/top5_acc": metrics['train/top5_acc'],
+                "val/top5_acc": metrics['val/top5_acc'],
                 "lr": lr,
                 "mfu": running_mfu*100, # convert to percentage
             })
-        if losses['val'] < best_val_loss or always_save_checkpoint:
-            best_val_loss = losses['val']
+        if metrics['val/loss'] < best_val_loss or always_save_checkpoint:
+            best_val_loss = metrics['val/loss']
             if iter_num > 0:
                 checkpoint = {
                     'model': raw_model.state_dict(),
